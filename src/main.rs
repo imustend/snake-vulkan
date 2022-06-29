@@ -1,80 +1,104 @@
-use console::Term;
-use std::{
-	collections::HashSet,
-	sync::{
-		mpsc::{
-			self,
-			Receiver,
-			TryRecvError
-		}
-	},
-	thread,
-	time::Duration,
-};
+use vulkano::{instance::{Instance, InstanceCreateInfo}, device::{physical::PhysicalDevice, Device, DeviceCreateInfo, QueueCreateInfo}, buffer::{CpuAccessibleBuffer, BufferUsage}, command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage}, sync::{self, GpuFuture}};
+use bytemuck::{Pod, Zeroable};
 
-mod random;
-mod snake;
 
-use crate::snake::{Direction, Snake};
-
-fn spawn_stdin_channel() -> Receiver<char> {
-    let (tx, rx) = mpsc::channel::<char>();
-    thread::spawn(move || loop {
-        let term = Term::stdout();
-        let mut temp = '_';
-        if let Ok(character) = term.read_char() {
-            temp = character;
-        }
-
-        tx.send(temp).unwrap();
-    });
-    rx
+#[repr(C)]
+#[derive(Default, Clone, Copy, Zeroable, Pod)]
+struct MyStruct {
+	a: u32,
+	b: u32,
 }
 
 fn main() {
-    let mut snake = Snake::new(10, 10, 2, 3);
-    let term = Term::stdout();
-    let _res = term.hide_cursor();
+	// creating vulkan instance 
+	let instance = Instance::new(InstanceCreateInfo::default()).expect("failed to create vulkan instance");
 
-	// yes i used zero width space, it works
-    let mut s_key = '​';
+	// choosing first device that supports vulkan
+	// NOTE: this doesnt mean the best device, this should be user input, i think
+	let physical = PhysicalDevice::enumerate(&instance).next().expect("no devices found");
 
-    let stdin_channel = spawn_stdin_channel();
+	// displaying number of families and queues in those families 
+	for family in physical.queue_families() {
+		println!("found a family with {:?} queue(s)", family.queues_count());
+	}
 
-    while !snake.lose {
-        let _res = term.clear_screen();
-        println!("{}", snake);
-        snake.grow_when_ate();
-        println!("Points: {}", snake.get_len());
+	// getting the queue family that supports graphical stuff
+	let queue_family = physical.queue_families()
+		.find(|&q| q.supports_graphics())
+		.expect("couldnt find a graphical queue family");
 
-        // check for key press
-        // some multi threading shenanigans 
-        match stdin_channel.try_recv() {
-            Ok(key) => {
-                s_key = key;
-            }
-            Err(TryRecvError::Empty) => {}
-            Err(TryRecvError::Disconnected) => panic!("Channel disconnected"),
-        }
+	// creating the device and getting the queues to comunicate with the gpu
+	let (device, mut queues) = Device::new(
+		physical,
+		DeviceCreateInfo {
+			queue_create_infos: vec![QueueCreateInfo::family(queue_family)],
+			..Default::default()
+		},
+	)
+	.expect("failed to create decive");
 
-        match s_key {
-			'w' => snake.snake_direction = Direction::Up,
-            'a' => snake.snake_direction = Direction::Left,
-            's' => snake.snake_direction = Direction::Down,
-            'd' => snake.snake_direction = Direction::Right,
-            _ => {}
-        }
-		// here again, the zero width space
-        if s_key == '​' {
-			println!("Press any key");
-			thread::sleep(Duration::from_millis(500));
-            continue;
-        }
-		
-		snake.move_snake();
+	// getting a single queue
+	//NOTE: from what i understand this is also not the proper way to do this stuff
+	let queue = queues.next().unwrap();
 
-        snake.check_if_lost();
-        thread::sleep(Duration::from_millis(500));
-    }
-    println!("you lose");
+
+
+	// BUFFER STUFF
+	// from what i understand buffer is place in memory where CPU and GPU can communicate
+	// they both write and read from there
+
+	// creating simple buffer
+	// NOTE: i could use the cpu cached buffer with the whole snake struct in it
+	let data = MyStruct { a: 5, b: 69 };
+	let buffer = CpuAccessibleBuffer::from_data(device.clone(), BufferUsage::all(), false, data)
+		.expect("failed to create buffer");
+
+
+	// getting the struct to write to
+	let mut contents = buffer.write().unwrap();
+	// `content` implements `DerefMut whose target is of type `MyStruct` (the content of the buffer)
+	contents.a *= 2;
+	contents.b = 9;
+
+
+	// FIRST GPU COMPUTATION
+	// will copy data from one buffer to another
+
+	// creating the buffers
+	let source_content: Vec<i32> = (0..64).collect();
+	let source = CpuAccessibleBuffer::from_iter(device.clone(), BufferUsage::all(), false, source_content)
+	.expect("failed to create buffer");
+
+	let destination_content: Vec<i32> = (0..64).map(|_| 0).collect();
+	let destination = CpuAccessibleBuffer::from_iter(device.clone(), BufferUsage::all(), false, destination_content)
+		.expect("failed to create buffer");
+
+
+	// creating builder(?) for command buffer(?)
+	// i have to read that chapter one more time
+	let mut builder = AutoCommandBufferBuilder::primary(
+		device.clone(),
+		queue.family(), 
+		CommandBufferUsage::OneTimeSubmit,
+	)
+	.unwrap();
+
+	// adding command to command buffer(?)
+	builder.copy_buffer(source.clone(), destination.clone()).unwrap();
+
+	let command_buffer = builder.build().unwrap();
+
+	// syncing cpu with gpu and sending command buffer and executing it
+	let future = sync::now(device.clone())
+	.then_execute(queue.clone(), command_buffer)
+	.unwrap()
+	.then_signal_fence_and_flush()
+	.unwrap();
+
+	future.wait(None).unwrap();
+
+	let src_content = source.read().unwrap();
+	let destination_content = destination.read().unwrap();
+	assert_eq!(&*src_content, &*destination_content);
+
 }
