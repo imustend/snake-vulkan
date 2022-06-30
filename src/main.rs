@@ -1,5 +1,3 @@
-use std::future;
-
 use bytemuck::{Pod, Zeroable};
 use vulkano::{
     buffer::{BufferUsage, CpuAccessibleBuffer},
