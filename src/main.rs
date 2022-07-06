@@ -1,10 +1,12 @@
 use bytemuck::{Pod, Zeroable};
+use image::{ImageBuffer, Rgba};
 use vulkano::{
+	format::{Format, ClearValue},
     buffer::{BufferUsage, CpuAccessibleBuffer},
-    command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage, self},
+    command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage},
     device::{physical::PhysicalDevice, Device, DeviceCreateInfo, QueueCreateInfo},
     instance::{Instance, InstanceCreateInfo},
-    sync::{self, GpuFuture}, pipeline::{ComputePipeline, Pipeline, PipelineBindPoint}, descriptor_set::{PersistentDescriptorSet, WriteDescriptorSet},
+    sync::{self, GpuFuture}, pipeline::{ComputePipeline, Pipeline, PipelineBindPoint}, descriptor_set::{PersistentDescriptorSet, WriteDescriptorSet}, image::{StorageImage, ImageDimensions},
 };
 
 #[repr(C)]
@@ -201,6 +203,71 @@ fn main() {
 	for (n, val) in content.iter().enumerate() {
 		assert_eq!(*val, n as u32 * 12);
 	}
+
+
+	//
+    // IMAGES!!!!!!!!!!!!!!!!!!!!!!
+
+	// creating an image
+	let image = StorageImage::new(
+		device.clone(),
+		ImageDimensions::Dim2d {
+			width: 1024,
+			height: 1024,
+			array_layers: 1,
+		},
+		Format::R8G8B8A8_UNORM, // format of image, some crazy shit is going on there but most times this one is sufficient
+		Some(queue.family())
+	).unwrap();
+
+	// i have already talked about that stuff
+	let mut builder = AutoCommandBufferBuilder::primary(
+		device.clone(),
+		queue_family,
+		CommandBufferUsage::OneTimeSubmit
+	).unwrap();
+
+	
+	// now this is stupid
+	// the images have "an opaque implementation-specific memory layout"
+	// this means only GPU can write and read from them
+	// so we got ask GPU to copy the image to cpu accesible buffer
+
+	
+	let buf = CpuAccessibleBuffer::from_iter(
+		device.clone(),
+		BufferUsage::all(),
+		false,
+		(0..1024 * 1024 * 4).map(|_| 0u8),
+
+	).expect("failed to create buffer");
+
+	builder
+		.clear_color_image(image.clone(), ClearValue::Float([0.1, 0.6, 0.7, 0.7]))
+		.unwrap()
+		.copy_image_to_buffer(image.clone(), buf.clone())
+		.unwrap();
+
+	let command_buffer = builder.build().unwrap();
+
+	// executing that shit
+
+	let future = sync::now(device.clone())
+		.then_execute(queue.clone(), command_buffer)
+		.unwrap()
+		.then_signal_fence_and_flush()
+		.unwrap();
+
+	future.wait(None).unwrap();
+
+	// saving the image to png file
+
+	let buffer_content = buf.read().unwrap();
+	// creating the image buffer
+	let image = ImageBuffer::<Rgba<u8>, _>::from_raw(1024, 1024, &buffer_content[..]).unwrap();
+
+
+	image.save("image.png").unwrap();
 
 	println!("Everything succeeded!");
 }
